@@ -48,6 +48,7 @@ s2n-codec = { path = "../../common/s2n-codec", features = ["testing"] }
 [target.'cfg(kani)'.dependencies]
 bolero = "0.7"
 bolero-generator = "0.7"
+s2n-codec = { path = "../../common/s2n-codec", features = ["testing"] }
 
 [[test]]
 name = "crypto"

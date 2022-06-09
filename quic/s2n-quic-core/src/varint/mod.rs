@@ -15,149 +15,12 @@ use bolero_generator::*;
 //# non-negative integer values.  This encoding ensures that smaller
 //# integer values need fewer bytes to encode.
 
-//# The QUIC variable-length integer encoding reserves the two most
-//# significant bits of the first byte to encode the base 2 logarithm of
-//# the integer encoding length in bytes.  The integer value is encoded
-//# on the remaining bits, in network byte order.
-
-//= https://www.rfc-editor.org/rfc/rfc9000#section-16
-//# This means that integers are encoded on 1, 2, 4, or 8 bytes and can
-//# encode 6-, 14-, 30-, or 62-bit values, respectively.  Table 4
-//# summarizes the encoding properties.
-//#
-//#        +======+========+=============+=======================+
-//#        | 2MSB | Length | Usable Bits | Range                 |
-//#        +======+========+=============+=======================+
-//#        | 00   | 1      | 6           | 0-63                  |
-//#        +------+--------+-------------+-----------------------+
-//#        | 01   | 2      | 14          | 0-16383               |
-//#        +------+--------+-------------+-----------------------+
-//#        | 10   | 4      | 30          | 0-1073741823          |
-//#        +------+--------+-------------+-----------------------+
-//#        | 11   | 8      | 62          | 0-4611686018427387903 |
-//#        +------+--------+-------------+-----------------------+
-
-pub const MAX_VARINT_VALUE: u64 = 4_611_686_018_427_387_903;
-
-#[derive(Debug)]
-pub struct VarIntError;
-
-// https://godbolt.org/z/ToTvPD
-#[inline(always)]
-fn read_table(x: u64) -> (u64, usize, u64) {
-    debug_assert!(x <= MAX_VARINT_VALUE);
-
-    macro_rules! table {
-        ($(($two_bit:expr, $length:expr, $usable_bits:expr, $max_value:expr);)*) => {{
-            let mut two_bit = 0;
-            let leading_zeros = x.leading_zeros();
-            $(
-                two_bit += if leading_zeros < (64 - $usable_bits) {
-                    1
-                } else {
-                    0
-                };
-            )*
-
-            let len = 1 << two_bit;
-            let usable_bits = len * 8 - 2;
-
-            debug_assert_eq!(len as usize, encoding_size(x));
-
-            (two_bit, len as usize, usable_bits)
-        }};
-    }
-
-    table! {
-        (0b00, 1, 6 , 63);
-        (0b01, 2, 14, 16_383);
-        (0b10, 4, 30, 1_073_741_823);
-    }
-}
-
-#[inline(always)]
-fn encoding_size(x: u64) -> usize {
-    debug_assert!(x <= MAX_VARINT_VALUE);
-
-    macro_rules! table {
-        ($(($two_bit:expr, $length:expr, $usable_bits:expr, $max_value:expr);)*) => {{
-            let leading_zeros = x.leading_zeros();
-            let mut len = 1;
-
-            $(
-                if leading_zeros < (64 - $usable_bits) {
-                    len = $length * 2;
-                };
-            )*
-
-            len
-        }};
-    }
-
-    table! {
-        (0b00, 1, 6 , 63);
-        (0b01, 2, 14, 16_383);
-        (0b10, 4, 30, 1_073_741_823);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[cfg_attr(miri, ignore)] // snapshot tests don't work on miri
-    fn table_snapshot_test() {
-        use insta::assert_debug_snapshot;
-        assert_debug_snapshot!("max_value", MAX_VARINT_VALUE);
-
-        // These values are derived from the "usable bits" column in the table: V and V-1
-        for i in [0, 1, 5, 6, 13, 14, 29, 30, 61] {
-            assert_debug_snapshot!(format!("table_2_pow_{}_", i), read_table(2u64.pow(i)));
-        }
-    }
-
-    //= https://www.rfc-editor.org/rfc/rfc9000#section-A.1
-    //# For example, the eight-byte sequence 0xc2197c5eff14e88c decodes to
-    //# the decimal value 151,288,809,941,952,652; the four-byte sequence
-    //# 0x9d7f3e7d decodes to 494,878,333; the two-byte sequence 0x7bbd
-    //# decodes to 15,293; and the single byte 0x25 decodes to 37 (as does
-    //# the two-byte sequence 0x4025).
-
-    macro_rules! sequence_test {
-        ($name:ident($input:expr, $expected:expr)) => {
-            #[test]
-            fn $name() {
-                use s2n_codec::assert_codec_round_trip_value;
-
-                let input = $input;
-                let expected = VarInt::new($expected).unwrap();
-                let actual_bytes = assert_codec_round_trip_value!(VarInt, expected);
-                assert_eq!(&input[..], &actual_bytes[..]);
-            }
-        };
-    }
-
-    sequence_test!(eight_byte_sequence_test(
-        [0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c],
-        151_288_809_941_952_652
-    ));
-
-    sequence_test!(four_byte_sequence_test(
-        [0x9d, 0x7f, 0x3e, 0x7d],
-        494_878_333
-    ));
-
-    sequence_test!(two_byte_sequence_test([0x7b, 0xbd], 15293));
-
-    sequence_test!(one_byte_sequence_test([0x25], 37));
-}
-
-// === API ===
-
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, PartialOrd, Ord)]
 #[cfg_attr(any(feature = "generator", test), derive(TypeGenerator))]
 pub struct VarInt(#[cfg_attr(any(feature = "generator", test), generator(Self::GENERATOR))] u64);
+
+#[derive(Debug)]
+pub struct VarIntError;
 
 impl core::fmt::Display for VarInt {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -372,41 +235,86 @@ decoder_value!(
     }
 );
 
-#[cfg(test)]
-mod encoder_tests {
-    use super::*;
-    use core::mem::size_of;
-    use s2n_codec::{DecoderBuffer, EncoderBuffer};
+//# The QUIC variable-length integer encoding reserves the two most
+//# significant bits of the first byte to encode the base 2 logarithm of
+//# the integer encoding length in bytes.  The integer value is encoded
+//# on the remaining bits, in network byte order.
 
-    fn test_update(initial: VarInt, expected: VarInt, encoder: &mut EncoderBuffer) {
-        encoder.set_position(0);
-        initial.encode_updated(expected, encoder);
-        let decoder = DecoderBuffer::new(encoder.as_mut_slice());
-        let (actual, _) = decoder.decode::<VarInt>().unwrap();
-        assert_eq!(expected, actual);
+//= https://www.rfc-editor.org/rfc/rfc9000#section-16
+//# This means that integers are encoded on 1, 2, 4, or 8 bytes and can
+//# encode 6-, 14-, 30-, or 62-bit values, respectively.  Table 4
+//# summarizes the encoding properties.
+//#
+//#        +======+========+=============+=======================+
+//#        | 2MSB | Length | Usable Bits | Range                 |
+//#        +======+========+=============+=======================+
+//#        | 00   | 1      | 6           | 0-63                  |
+//#        +------+--------+-------------+-----------------------+
+//#        | 01   | 2      | 14          | 0-16383               |
+//#        +------+--------+-------------+-----------------------+
+//#        | 10   | 4      | 30          | 0-1073741823          |
+//#        +------+--------+-------------+-----------------------+
+//#        | 11   | 8      | 62          | 0-4611686018427387903 |
+//#        +------+--------+-------------+-----------------------+
+
+pub const MAX_VARINT_VALUE: u64 = 4_611_686_018_427_387_903;
+
+// https://godbolt.org/z/ToTvPD
+#[inline(always)]
+fn read_table(x: u64) -> (u64, usize, u64) {
+    debug_assert!(x <= MAX_VARINT_VALUE);
+
+    macro_rules! table {
+        ($(($two_bit:expr, $length:expr, $usable_bits:expr, $max_value:expr);)*) => {{
+            let mut two_bit = 0;
+            let leading_zeros = x.leading_zeros();
+            $(
+                two_bit += if leading_zeros < (64 - $usable_bits) {
+                    1
+                } else {
+                    0
+                };
+            )*
+
+            let len = 1 << two_bit;
+            let usable_bits = len * 8 - 2;
+
+            debug_assert_eq!(len as usize, encoding_size(x));
+
+            (two_bit, len as usize, usable_bits)
+        }};
     }
 
-    #[test]
-    fn encode_updated_test() {
-        let mut buffer = [0u8; size_of::<VarInt>()];
-        let mut encoder = EncoderBuffer::new(&mut buffer);
-        let initial = VarInt::from_u16(1 << 14);
-        encoder.encode(&initial);
+    table! {
+        (0b00, 1, 6 , 63);
+        (0b01, 2, 14, 16_383);
+        (0b10, 4, 30, 1_073_741_823);
+    }
+}
 
-        test_update(initial, VarInt::from_u32(0), &mut encoder);
-        test_update(initial, VarInt::from_u32(1 << 14), &mut encoder);
-        test_update(initial, VarInt::from_u32(1 << 29), &mut encoder);
+#[inline(always)]
+fn encoding_size(x: u64) -> usize {
+    debug_assert!(x <= MAX_VARINT_VALUE);
+
+    macro_rules! table {
+        ($(($two_bit:expr, $length:expr, $usable_bits:expr, $max_value:expr);)*) => {{
+            let leading_zeros = x.leading_zeros();
+            let mut len = 1;
+
+            $(
+                if leading_zeros < (64 - $usable_bits) {
+                    len = $length * 2;
+                };
+            )*
+
+            len
+        }};
     }
 
-    #[test]
-    #[should_panic]
-    fn encode_updated_invalid_test() {
-        let mut buffer = [0u8; size_of::<VarInt>()];
-        let mut encoder = EncoderBuffer::new(&mut buffer);
-        let initial = VarInt::from_u16(1 << 14);
-        encoder.encode(&initial);
-
-        test_update(initial, VarInt::from_u32(1 << 30), &mut encoder);
+    table! {
+        (0b00, 1, 6 , 63);
+        (0b01, 2, 14, 16_383);
+        (0b10, 4, 30, 1_073_741_823);
     }
 }
 
@@ -743,5 +651,185 @@ impl PartialOrd<usize> for VarInt {
     #[inline]
     fn partial_cmp(&self, other: &usize) -> Option<core::cmp::Ordering> {
         self.0.partial_cmp(&(*other as u64))
+    }
+}
+
+#[cfg(any(test, kani))]
+mod tests {
+    use super::*;
+    use bolero::check;
+    use core::mem::size_of;
+    use s2n_codec::{assert_codec_round_trip_value, DecoderBuffer, EncoderBuffer};
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // snapshot tests don't work on miri
+    fn table_snapshot_test() {
+        use insta::assert_debug_snapshot;
+        assert_debug_snapshot!("max_value", MAX_VARINT_VALUE);
+
+        // These values are derived from the "usable bits" column in the table: V and V-1
+        for i in [0, 1, 5, 6, 13, 14, 29, 30, 61] {
+            assert_debug_snapshot!(format!("table_2_pow_{}_", i), read_table(2u64.pow(i)));
+        }
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-A.1
+    //# For example, the eight-byte sequence 0xc2197c5eff14e88c decodes to
+    //# the decimal value 151,288,809,941,952,652; the four-byte sequence
+    //# 0x9d7f3e7d decodes to 494,878,333; the two-byte sequence 0x7bbd
+    //# decodes to 15,293; and the single byte 0x25 decodes to 37 (as does
+    //# the two-byte sequence 0x4025).
+
+    macro_rules! sequence_test {
+        ($name:ident($input:expr, $expected:expr)) => {
+            #[test]
+            fn $name() {
+                let input = $input;
+                let expected = VarInt::new($expected).unwrap();
+                let actual_bytes = assert_codec_round_trip_value!(VarInt, expected);
+                assert_eq!(&input[..], &actual_bytes[..]);
+            }
+        };
+    }
+
+    sequence_test!(eight_byte_sequence_test(
+        [0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c],
+        151_288_809_941_952_652
+    ));
+
+    sequence_test!(four_byte_sequence_test(
+        [0x9d, 0x7f, 0x3e, 0x7d],
+        494_878_333
+    ));
+
+    sequence_test!(two_byte_sequence_test([0x7b, 0xbd], 15293));
+
+    sequence_test!(one_byte_sequence_test([0x25], 37));
+
+    fn test_update(initial: VarInt, expected: VarInt, encoder: &mut EncoderBuffer) {
+        encoder.set_position(0);
+        initial.encode_updated(expected, encoder);
+        let decoder = DecoderBuffer::new(encoder.as_mut_slice());
+        let (actual, _) = decoder.decode::<VarInt>().unwrap();
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn encode_updated_test() {
+        let mut buffer = [0u8; size_of::<VarInt>()];
+        let mut encoder = EncoderBuffer::new(&mut buffer);
+        let initial = VarInt::from_u16(1 << 14);
+        encoder.encode(&initial);
+
+        test_update(initial, VarInt::from_u32(0), &mut encoder);
+        test_update(initial, VarInt::from_u32(1 << 14), &mut encoder);
+        test_update(initial, VarInt::from_u32(1 << 29), &mut encoder);
+    }
+
+    #[test]
+    #[should_panic]
+    fn encode_updated_invalid_test() {
+        let mut buffer = [0u8; size_of::<VarInt>()];
+        let mut encoder = EncoderBuffer::new(&mut buffer);
+        let initial = VarInt::from_u16(1 << 14);
+        encoder.encode(&initial);
+
+        test_update(initial, VarInt::from_u32(1 << 30), &mut encoder);
+    }
+
+    #[cfg_attr(not(kani), test)]
+    #[cfg_attr(kani, kani::proof, kani::unwind(5))]
+    fn table_differential_test() {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-16
+        //= type=test
+        //# This means that integers are encoded on 1, 2, 4, or 8 bytes and can
+        //# encode 6-, 14-, 30-, or 62-bit values, respectively.  Table 4
+        //# summarizes the encoding properties.
+        //#
+        //#        +======+========+=============+=======================+
+        //#        | 2MSB | Length | Usable Bits | Range                 |
+        //#        +======+========+=============+=======================+
+        //#        | 00   | 1      | 6           | 0-63                  |
+        //#        +------+--------+-------------+-----------------------+
+        //#        | 01   | 2      | 14          | 0-16383               |
+        //#        +------+--------+-------------+-----------------------+
+        //#        | 10   | 4      | 30          | 0-1073741823          |
+        //#        +------+--------+-------------+-----------------------+
+        //#        | 11   | 8      | 62          | 0-4611686018427387903 |
+        //#        +------+--------+-------------+-----------------------+
+
+        check!()
+            .with_generator(0..=MAX_VARINT_VALUE)
+            .cloned()
+            .for_each(|v| {
+                let actual = read_table(v);
+
+                // make sure the encoding_size function matches the table
+                assert_eq!(actual.1, encoding_size(v));
+
+                #[allow(clippy::match_overlapping_arm)]
+                let expected = match v {
+                    0..=63 => (0b00, 1, 6),
+                    0..=16383 => (0b01, 2, 14),
+                    0..=1073741823 => (0b10, 4, 30),
+                    0..=4611686018427387903 => (0b11, 8, 62),
+                    _ => unreachable!(),
+                };
+
+                assert_eq!(actual, expected);
+            })
+    }
+
+    #[cfg_attr(not(kani), test)]
+    #[cfg_attr(kani, kani::proof, kani::unwind(10))]
+    fn round_trip_test() {
+        check!().with_type().cloned().for_each(|v| {
+            if let Ok(v) = VarInt::new(v) {
+                assert_codec_round_trip_value!(VarInt, v);
+            } else {
+                assert!(v > MAX_VARINT_VALUE);
+            }
+        })
+    }
+
+    #[cfg_attr(not(kani), test)]
+    #[cfg_attr(kani, kani::proof, kani::unwind(5))]
+    fn checked_ops_test() {
+        check!().with_type().cloned().for_each(|(a, b)| {
+            if let (Ok(a_v), Ok(b_v)) = (VarInt::new(a), VarInt::new(b)) {
+                macro_rules! checked {
+                    ($checked:ident, $op:tt) => {{
+                        if let Some(res) = a_v.$checked(b_v) {
+                            // make sure the behavior matches that of u64
+                            assert_eq!(Some(res.as_u64()), a.$checked(b));
+
+                            // make sure the normal operation works as well
+                            assert_eq!(res, a_v $op b_v);
+                        } else {
+                            // make sure the behavior matches that of u64
+                            let expected = a.$checked(b).and_then(|v| VarInt::new(v).ok());
+                            assert!(expected.is_none());
+                        }
+                    }};
+                }
+
+                checked!(checked_add, +);
+                checked!(checked_sub, -);
+                checked!(checked_mul, *);
+                checked!(checked_div, /);
+
+                macro_rules! saturating {
+                    ($name:ident) => {{
+                        let actual = a_v.$name(b_v);
+                        let expected = VarInt::new(a.$name(b)).unwrap_or(VarInt::MAX);
+                        assert_eq!(actual, expected);
+                    }};
+                }
+
+                saturating!(saturating_add);
+                saturating!(saturating_sub);
+                saturating!(saturating_mul);
+            }
+        })
     }
 }

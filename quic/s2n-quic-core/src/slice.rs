@@ -153,8 +153,7 @@ mod tests {
     const LEN: usize = if cfg!(kani) { 2 } else { 32 };
 
     #[cfg_attr(not(kani), test)]
-    #[cfg_attr(kani, kani::proof)]
-    #[cfg_attr(kani, kani::unwind(5))]
+    #[cfg_attr(kani, kani::proof, kani::unwind(5))]
     fn vectored_copy_fuzz_test() {
         check!()
             .with_type::<(
