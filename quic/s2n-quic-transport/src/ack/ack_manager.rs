@@ -11,6 +11,7 @@ use crate::{
     processed_packet::ProcessedPacket,
     transmission,
 };
+use once_cell::sync::OnceCell;
 use s2n_quic_core::{
     ack,
     counter::{Counter, Saturating},
@@ -24,6 +25,8 @@ use s2n_quic_core::{
     time::{timer, Timer, Timestamp},
     varint::VarInt,
 };
+
+static PACKET_TOL: OnceCell<u8> = OnceCell::new();
 
 //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2
 //# Endpoints acknowledge all packets they receive and process.  However,
@@ -312,9 +315,15 @@ impl AckManager {
 
             // TODO support delayed ack proposal
             // https://tools.ietf.org/html/draft-iyengar-quic-delayed-ack-00
-            let packet_tolerance = 10;
+            PACKET_TOL.get_or_init(|| {
+                let env = std::env::var("PACKET_TOL").unwrap_or_else(|_| "10".to_string());
+                let tol = env.parse().unwrap();
+                println!("------------packet tolerance: {}", tol);
+                tol
+            });
 
-            should_activate |= self.processed_packets_since_transmission >= packet_tolerance;
+            should_activate |=
+                self.processed_packets_since_transmission >= *PACKET_TOL.get().unwrap();
 
             //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.3
             //# An endpoint that receives a PATH_CHALLENGE on an active path SHOULD
