@@ -74,6 +74,11 @@ public class NetbenchAutoApp {
             ? "/usr/bin/request_response.json"
             : scenarioFile;
         
+        String arm = (String)app.getNode().tryGetContext("arm");
+        arm = (arm == null) 
+            ? "true"
+            : arm.toLowerCase();
+
         // Stack instantiation   
         VpcStack vpcStack = new VpcStack(app, "VpcStack", VpcStackProps.builder()
             .env(makeEnv(awsAccount, serverRegion))
@@ -89,6 +94,7 @@ public class NetbenchAutoApp {
             .ecrUri(serverEcrUri)
             .scenario(scenarioFile)
             .serverRegion(serverRegion)
+            .arm(arm)
             .build());
 
         serverEcsStack.addDependency(vpcStack);
@@ -103,6 +109,7 @@ public class NetbenchAutoApp {
             .dnsAddress(serverEcsStack.getDnsAddress())
             .ecrUri(clientEcrUri)
             .scenario(scenarioFile)
+            .arm(arm)
             .build());
         
         clientEcsStack.addDependency(serverEcsStack);
